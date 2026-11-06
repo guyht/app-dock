@@ -843,43 +843,82 @@ function isFiniteNumber(v: unknown): v is number {
       return { x: r.left, y: r.top }
     }
 
-    // Dedupe: touchstart and pointerdown often both fire for the same gesture.
-    // We accept whichever arrives first and ignore the other if it's within
-    // 50 ms (the browser's synthesized-event coalescence window). The window is
-    // measured in event time: after the page stalls, two real taps can be
-    // handled back to back, and neither may be taken for the other's twin.
-    let lastEventAt = -Infinity
-    const COALESCE_MS = 50
+    // A contact is a tap only after release: starting a scroll or pinch must
+    // never count towards the double-tap that opens the dock. Keep both input
+    // families for touchscreens whose browser does not deliver pointer events,
+    // but let only the family that began this contact finish it.
+    const TAP_MOVE_PX = 12
+    const TAP_HOLD_MS = 350
+    type Contact = { kind: 'pointer' | 'touch'; id: number; x: number; y: number; time: number }
+    let contact: Contact | null = null
+    const pointers = new Set<number>()
+    const options = { passive: true, capture: true }
 
-    const onDown = (x: number, y: number, time: number) => {
-      if (Math.abs(time - lastEventAt) < COALESCE_MS) return
-      lastEventAt = time
-      handleTap(x, y, null, time)
+    const cancel = () => {
+      contact = null
+      lastTapTime = 0
+    }
+    const move = (x: number, y: number) => {
+      if (contact && Math.hypot(x - contact.x, y - contact.y) > TAP_MOVE_PX) cancel()
+    }
+    const finish = (x: number, y: number, e: Event) => {
+      const began = contact
+      move(x, y)
+      if (!contact || !began) return
+      contact = null
+      const time = eventTime(doc, e)
+      if (time - began.time > TAP_HOLD_MS || time < began.time) {
+        cancel()
+        return
+      }
+      const o = offset()
+      handleTap(x + o.x, y + o.y, null, time)
     }
 
-    doc.addEventListener(
-      'pointerdown',
-      (e) => {
-        const o = offset()
-        onDown(e.clientX + o.x, e.clientY + o.y, eventTime(doc, e))
-      },
-      { passive: true, capture: true }
-    )
-
-    // Fallback for Windows touchscreens + some browsers where the root
-    // document does not receive pointerdown for finger input (observed on
-    // W11 with touch-action: none). touchstart is the universally-supported
-    // event for direct touch.
-    doc.addEventListener(
-      'touchstart',
-      (e) => {
-        if (!e.touches || e.touches.length === 0) return
-        const t = e.touches[0]
-        const o = offset()
-        onDown(t.clientX + o.x, t.clientY + o.y, eventTime(doc, e))
-      },
-      { passive: true, capture: true }
-    )
+    doc.addEventListener('pointerdown', (e) => {
+      if (contact?.kind === 'touch' || e.button !== 0) return
+      pointers.add(e.pointerId)
+      if (pointers.size !== 1 || !e.isPrimary) {
+        cancel()
+        return
+      }
+      contact = { kind: 'pointer', id: e.pointerId, x: e.clientX, y: e.clientY, time: eventTime(doc, e) }
+    }, options)
+    doc.addEventListener('pointermove', (e) => {
+      if (contact?.kind === 'pointer' && contact.id === e.pointerId) move(e.clientX, e.clientY)
+    }, options)
+    doc.addEventListener('pointerup', (e) => {
+      pointers.delete(e.pointerId)
+      if (contact?.kind === 'pointer' && contact.id === e.pointerId) finish(e.clientX, e.clientY, e)
+    }, options)
+    doc.addEventListener('pointercancel', (e) => {
+      pointers.delete(e.pointerId)
+      cancel()
+    }, options)
+    doc.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) {
+        cancel()
+        return
+      }
+      if (pointers.size || contact?.kind === 'pointer') return
+      const t = e.touches[0]
+      contact = { kind: 'touch', id: t.identifier, x: t.clientX, y: t.clientY, time: eventTime(doc, e) }
+    }, options)
+    doc.addEventListener('touchmove', (e) => {
+      if (contact?.kind !== 'touch') return
+      const t = Array.from(e.touches).find(t => t.identifier === contact?.id)
+      if (e.touches.length !== 1 || !t) cancel()
+      else move(t.clientX, t.clientY)
+    }, options)
+    doc.addEventListener('touchend', (e) => {
+      if (contact?.kind !== 'touch') return
+      const t = Array.from(e.changedTouches).find(t => t.identifier === contact?.id)
+      if (e.touches.length || !t) cancel()
+      else finish(t.clientX, t.clientY, e)
+    }, options)
+    doc.addEventListener('touchcancel', cancel, options)
+    doc.addEventListener('scroll', cancel, options)
+    doc.addEventListener('wheel', cancel, options)
   }
 
   // Recursively attach to iframes at any nesting depth. Webapps like KIP
