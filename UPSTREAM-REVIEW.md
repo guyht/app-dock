@@ -26,3 +26,7 @@ not a claim of passing CI, deployment readiness or completed hardware validation
 
 Keep boat identity, credentials, live data, custom release suffixes and deployment
 scripts out of an upstream submission. Publish nothing to the parent until approved.
+
+## Preparation results — 6 November 2026
+
+Fresh local validation on Node 26.12.1: full upstream build succeeded; 46/46 existing tests passed. Real-device iOS and targeted browser regressions remain pending.
